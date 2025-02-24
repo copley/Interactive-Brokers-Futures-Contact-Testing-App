@@ -1,0 +1,810 @@
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\backtesting_app.py
+################################################################################
+
+# backtesting_app.py
+
+import json
+import pandas as pd
+
+from data_loader import DataLoader
+from indicator_calculator import IndicatorCalculator
+from strategy_logic import StrategyLogic
+from execution_simulator import ExecutionSimulator
+from performance_analyzer import PerformanceAnalyzer
+
+def main():
+    print("===== Starting Backtesting Application =====")
+
+    # 1) Load config.json
+    with open("config.json", "r") as f:
+        config = json.load(f)
+
+    # 2) Create DataLoader
+    loader = DataLoader(data_path='./data')
+    file_map = {
+        '1m': 'MES_1_min.csv',
+        '5m': 'MES_5_mins.csv',
+    }
+    timeframes = loader.load_all_timeframes(file_map)
+    print("Loaded timeframes:", list(timeframes.keys()))
+
+    # 3) Compute indicators from config
+    calculator = IndicatorCalculator()
+    ind_cfg = config["indicators"]
+
+    df_1m = calculator.add_indicators(
+        timeframes['1m'].copy(),
+        short_ema_period = ind_cfg["short_ema_period"],
+        medium_ema_period = ind_cfg["medium_ema_period"],
+        rsi_period = ind_cfg["rsi_period"],
+        atr_period = ind_cfg["atr_period"],
+        compute_macd = ind_cfg["compute_macd"],
+        compute_stoch = ind_cfg["compute_stoch"]
+    ).reset_index()
+
+    df_5m = calculator.add_indicators(
+        timeframes['5m'].copy(),
+        short_ema_period = ind_cfg["short_ema_period"],
+        medium_ema_period = ind_cfg["medium_ema_period"],
+        rsi_period = ind_cfg["rsi_period"],
+        atr_period = ind_cfg["atr_period"],
+        compute_macd = ind_cfg["compute_macd"],
+        compute_stoch = ind_cfg["compute_stoch"]
+    ).reset_index()
+
+    # 4) Rename columns, merge 1m into 5m
+    df_1m = df_1m.rename(columns={
+        'EMA_short': 'EMA_short_1m',
+        'EMA_medium': 'EMA_medium_1m',
+        'RSI': 'RSI_1m',
+        'ATR': 'ATR_1m',
+        'MACD': 'MACD_1m',
+        'MACD_signal': 'MACD_signal_1m',
+        'StochK': 'StochK_1m',
+        'StochD': 'StochD_1m',
+    })
+    df_5m = df_5m.rename(columns={
+        'EMA_short': 'EMA_short_5m',
+        'EMA_medium': 'EMA_medium_5m',
+        'RSI': 'RSI_5m',
+        'ATR': 'ATR_5m',
+        'MACD': 'MACD_5m',
+        'MACD_signal': 'MACD_signal_5m',
+        'StochK': 'StochK_5m',
+        'StochD': 'StochD_5m',
+    })
+
+    merged = pd.merge_asof(
+        df_5m,
+        df_1m[['time','EMA_short_1m','EMA_medium_1m','RSI_1m','ATR_1m',
+               'MACD_1m','MACD_signal_1m','StochK_1m','StochD_1m']],
+        on='time'
+    )
+    merged.ffill(inplace=True)
+    print("Merged DataFrame head:")
+    print(merged.head())
+    # 4) Initialize Strategy & Simulator with trailing stop config
+    exec_cfg = config["execution"]
+    simulator = ExecutionSimulator(
+        stop_offset = exec_cfg["stop_offset"],
+        target_offset = exec_cfg["target_offset"],
+        default_quantity = exec_cfg.get("default_quantity", 1),
+        enable_trailing_stop = exec_cfg.get("enable_trailing_stop", False),
+        trailing_stop_offset = exec_cfg.get("trailing_stop_offset", 2.0)
+    )
+    # 5) Initialize Strategy & Simulator
+    strategy_config = config["strategy"]
+    strategy_logic = StrategyLogic(strategy_config)
+
+    # Pass stop_offset/target_offset from config
+    simulator = ExecutionSimulator(
+        stop_offset=config["execution"]["stop_offset"],
+        target_offset=config["execution"]["target_offset"]
+    )
+
+    # 6) Main loop: iterate each bar, check signals, process stop/target
+    for idx, row in merged.iterrows():
+        bar_time = row['time']
+        
+        # (A) If outside session, skip new trades, but still check open position
+        if not is_within_full_session(bar_time):
+            # Check if an open position hits stop/target even outside session
+            if simulator.open_position:
+                exit_info = simulator.check_stop_loss_or_profit_target(row)
+                if exit_info:
+                    exit_signal = {
+                        'type': 'EXIT',
+                        'position_type': simulator.open_position['type'],
+                        'exit_price': exit_info['exit_price'],
+                        'reason': exit_info['reason']
+                    }
+                    simulator.process_signal(exit_signal, row)
+            continue
+
+        # Build data_point for the bar
+        data_point = {
+            'time': bar_time,
+            'open':  row['open'],
+            'high':  row['high'],
+            'low':   row['low'],
+            'close': row['close'],
+            'volume': row['volume']
+        }
+
+        # Build multi_indicators for 1m & 5m
+        multi_indicators = {
+            '1m': {
+                'EMA_short': row['EMA_short_1m'],
+                'EMA_medium': row['EMA_medium_1m'],
+                'RSI': row['RSI_1m'],
+                'ATR': row['ATR_1m'],
+                'MACD': row['MACD_1m'],
+                'MACD_signal': row['MACD_signal_1m'],
+                'StochK': row['StochK_1m'],
+                'StochD': row['StochD_1m'],
+            },
+            '5m': {
+                'EMA_short': row['EMA_short_5m'],
+                'EMA_medium': row['EMA_medium_5m'],
+                'RSI': row['RSI_5m'],
+                'ATR': row['ATR_5m'],
+                'MACD': row['MACD_5m'],
+                'MACD_signal': row['MACD_signal_5m'],
+                'StochK': row['StochK_5m'],
+                'StochD': row['StochD_5m'],
+            },
+        }
+
+        # 6a) Check for new entry signal
+        signal = strategy_logic.check_signal(data_point, multi_indicators)
+        if signal:
+            # If we get a LONG/SHORT, open the position
+            simulator.process_signal(signal, data_point)
+
+        # 6b) If position is open, check for stop-loss or take-profit
+        if simulator.open_position:
+            exit_info = simulator.check_stop_loss_or_profit_target(data_point)
+            if exit_info is not None:
+                # That means we must exit the position
+                exit_signal = {
+                    'type': 'EXIT',
+                    'position_type': simulator.open_position['type'],
+                    'exit_price': exit_info['exit_price'],
+                    'reason': exit_info['reason']
+                }
+                simulator.process_signal(exit_signal, data_point)
+
+    # 7) Analyze trades
+    trades = simulator.trades
+    analyzer = PerformanceAnalyzer(trades)
+    stats = analyzer.compute_detailed_metrics()
+
+    label = "Two-Timeframe (1m & 5m) - Full 8H Session"
+    print(f"\n=== {label} Trades ===")
+    print(f"Total Trades:          {stats.get('total_trades', 0)}")
+    print(f"Winners / Losers:      {stats.get('winning_trades', 0)} / {stats.get('losing_trades', 0)}")
+    print(f"Win Rate:              {stats.get('win_rate', 0):.2f}%")
+    print(f"Avg P/L:               {stats.get('avg_pl', 0):.2f}")
+    print(f"Largest Win:           {stats.get('largest_win', 0):.2f}")
+    print(f"Largest Loss:          {stats.get('largest_loss', 0):.2f}")
+    print(f"Profit Factor:         {stats.get('profit_factor', 0):.3f}")
+    print(f"Avg Win / Avg Loss:    {stats.get('ratio_avg_win_loss', 0):.3f}")
+    if stats.get("avg_bar_count") is not None:
+        print(f"Avg # bars in trades:  {stats['avg_bar_count']:.1f}")
+
+def is_within_full_session(bar_time):
+    """Example session: 9:30 to 17:30 local/ET."""
+    if bar_time.hour < 9:
+        return False
+    if bar_time.hour == 9 and bar_time.minute < 30:
+        return False
+    if bar_time.hour > 17:
+        return False
+    if bar_time.hour == 17 and bar_time.minute >= 30:
+        return False
+    return True
+
+if __name__ == "__main__":
+    main()
+
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\data_loader.py
+################################################################################
+
+import pandas as pd
+import os
+
+class DataLoader:
+    """
+    Reads historical market data (from CSV in this example) for multiple
+    timeframes (1m, 5m, 30m, 1h).
+    """
+    def __init__(self, data_path: str = '.'):
+        self.data_path = data_path
+
+    def load_data(self, file_name: str) -> pd.DataFrame:
+        """
+        Load CSV data containing at least columns:
+        ['time', 'open', 'high', 'low', 'close', 'volume'].
+        The 'time' column should be parseable as a datetime.
+        """
+        csv_path = os.path.join(self.data_path, file_name)
+        df = pd.read_csv(csv_path, parse_dates=['time'], index_col='time')
+        df = df.sort_index()
+        # Ensure columns are in the correct order; fill missing with 0 or ffill if needed
+        df = df[['open', 'high', 'low', 'close', 'volume']].copy()
+        df.dropna(inplace=True)
+        return df
+
+    def load_all_timeframes(self, file_map: dict) -> dict:
+        {
+            '1m': 'MES_1_min.csv',
+            '5m': 'MES_5_mins.csv',
+            '30m': 'MES_30_mins.csv',
+            '1h': 'MES_1_hour.csv'
+        }
+        dataframes = {}
+        for tf, file_name in file_map.items():
+            df = self.load_data(file_name)
+            dataframes[tf] = df
+        return dataframes
+
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\entry_manager.py
+################################################################################
+
+class EntryManager:
+    def __init__(self, strategy_config: dict):
+        self.rsi_overbought = strategy_config.get('RSI_overbought', 70)
+        self.rsi_oversold = strategy_config.get('RSI_oversold', 30)
+        self.last_signal = None
+
+    def evaluate_entry(self, data_point: dict, indicators: dict, timeframe: str = None):
+        """
+        Evaluate indicators and price data to decide whether to enter a trade.
+        Returns a signal dict if entry criteria are met, otherwise None.
+    
+        data_point: e.g. {'time': ..., 'close': ..., 'open': ..., etc.}
+        indicators: e.g. {'EMA': ..., 'RSI': ...}
+        timeframe: string identifier for logging/debugging purposes.
+        """
+        signal = None
+        price = data_point.get('close')
+        if price is None:
+            return None
+    
+        ema_value = indicators.get('EMA')
+        rsi_value = indicators.get('RSI')
+    
+        # For demonstration, use the same logic as before.
+        if rsi_value is not None and ema_value is not None:
+            if rsi_value < self.rsi_oversold and price > ema_value:
+                signal = {'type': 'LONG', 'reason': f'RSI oversold and price > EMA on {timeframe}'}
+            elif rsi_value > self.rsi_overbought and price < ema_value:
+                signal = {'type': 'SHORT', 'reason': f'RSI overbought and price < EMA on {timeframe}'}
+    
+        if signal:
+            print(f"EntryManager ({timeframe}): Entry signal detected -> {signal}")
+        self.last_signal = signal
+        return signal
+
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\execution_simulator.py
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\execution_simulator.py
+
+class ExecutionSimulator:
+    """
+    Simulates trade execution in a backtest environment.
+    Tracks open positions, stop-loss/target offsets, trailing stops, position sizing, and PnL.
+    """
+
+    def __init__(self, 
+                 stop_offset: float = 2.0,
+                 target_offset: float = 5.0,
+                 default_quantity: int = 1,
+                 enable_trailing_stop: bool = False,
+                 trailing_stop_offset: float = 2.0):
+        """
+        :param stop_offset: How many points below entry to set the initial stop-loss (for a LONG).
+        :param target_offset: How many points above entry to set the take-profit (for a LONG).
+        :param default_quantity: Number of contracts/shares traded per signal.
+        :param enable_trailing_stop: Whether to use trailing-stop logic.
+        :param trailing_stop_offset: Points behind the best favorable price for a trailing stop.
+        """
+        self.stop_offset = stop_offset
+        self.target_offset = target_offset
+        self.default_quantity = default_quantity
+
+        self.enable_trailing_stop = enable_trailing_stop
+        self.trailing_stop_offset = trailing_stop_offset
+
+        # Track any currently open position (dict or None).
+        self.open_position = None
+
+        # Keep a list of completed trades (dicts).
+        self.trades = []
+
+    def process_signal(self, signal: dict, data_point: dict):
+        """
+        Processes a trading signal (LONG, SHORT, or EXIT).
+        If LONG/SHORT, opens a position if none is open.
+        If EXIT, closes the open position if it matches the position_type.
+        Returns the position or trade dict, or None.
+        """
+        signal_type = signal.get('type')
+        time_ = data_point.get('time')
+        close_price = data_point.get('close', 0.0)
+
+        if signal_type in ['LONG', 'SHORT']:
+            # Only open a new position if none is currently open.
+            if self.open_position is None:
+                self.open_position = {
+                    'type': signal_type,
+                    'entry_price': close_price,
+                    'entry_time': time_,
+                    'quantity': self.default_quantity,
+                    'reason': signal.get('reason', ''),
+
+                    # For trailing stop logic:
+                    # Track the best favorable price since entry (for LONG: highest high; for SHORT: lowest low).
+                    'best_price': close_price
+                }
+                print(f"ExecutionSimulator: Opened {signal_type} at {close_price} on {time_} for qty={self.default_quantity}")
+                return self.open_position
+
+        elif signal_type == 'EXIT':
+            # Close the position if it matches the signal's position_type
+            if (self.open_position is not None and
+                self.open_position['type'] == signal.get('position_type')):
+                
+                exit_price = signal.get('exit_price', close_price)
+                trade = {
+                    'position_type': self.open_position['type'],
+                    'entry_price': self.open_position['entry_price'],
+                    'exit_price': exit_price,
+                    'entry_time': self.open_position['entry_time'],
+                    'exit_time': time_,
+                    'quantity': self.open_position['quantity'],
+                    'reason': signal.get('reason', '')
+                }
+                self.trades.append(trade)
+                print(f"ExecutionSimulator: Closed {trade['position_type']} at {exit_price} on {time_}, reason={trade['reason']}")
+
+                self.open_position = None
+                return trade
+
+        return None  # No action if conditions not met
+
+    def check_stop_loss_or_profit_target(self, data_point: dict):
+        """
+        Checks if the current bar (via its high/low) hits:
+          1) The trailing stop (if enabled)
+          2) The fixed stop-loss 
+          3) The take-profit target
+
+        Returns a dict with exit info if triggered, else None.
+        """
+        if not self.open_position:
+            return None  # No open position to check
+
+        bar_high = data_point.get('high', 0.0)
+        bar_low = data_point.get('low', 0.0)
+        close_price = data_point.get('close', 0.0)
+        position_type = self.open_position['type']
+        entry_price = self.open_position['entry_price']
+        
+        # 1) Update best favorable price if trailing stop is enabled
+        if self.enable_trailing_stop:
+            if position_type == 'LONG':
+                # If the current bar's high is above the previous best_price, update
+                if bar_high > self.open_position['best_price']:
+                    self.open_position['best_price'] = bar_high
+            else:  # SHORT
+                # If current bar's low is below the previous best_price, update
+                if bar_low < self.open_position['best_price']:
+                    self.open_position['best_price'] = bar_low
+
+        # 2) Compute potential stop-loss levels
+        if position_type == 'LONG':
+            # A) If trailing is enabled, trailing_stop is best_price - trailing_stop_offset
+            if self.enable_trailing_stop:
+                trailing_stop_price = self.open_position['best_price'] - self.trailing_stop_offset
+            else:
+                trailing_stop_price = entry_price - self.stop_offset
+
+            # B) fixed target
+            take_profit = entry_price + self.target_offset
+
+            # Check if we hit trailing stop or fixed stop
+            if bar_low <= trailing_stop_price:
+                return {
+                    'exit_price': trailing_stop_price,
+                    'reason': 'StopLoss hit (trailing)' if self.enable_trailing_stop else 'StopLoss hit'
+                }
+            # Then check take-profit
+            elif bar_high >= take_profit:
+                return {
+                    'exit_price': take_profit,
+                    'reason': 'TakeProfit hit'
+                }
+
+        else:  # SHORT
+            if self.enable_trailing_stop:
+                trailing_stop_price = self.open_position['best_price'] + self.trailing_stop_offset
+            else:
+                trailing_stop_price = entry_price + self.stop_offset
+
+            take_profit = entry_price - self.target_offset
+
+            if bar_high >= trailing_stop_price:
+                return {
+                    'exit_price': trailing_stop_price,
+                    'reason': 'StopLoss hit (trailing)' if self.enable_trailing_stop else 'StopLoss hit'
+                }
+            elif bar_low <= take_profit:
+                return {
+                    'exit_price': take_profit,
+                    'reason': 'TakeProfit hit'
+                }
+
+        return None  # No stop or target triggered
+
+    def get_open_position(self):
+        """Return the currently open position dict or None."""
+        return self.open_position
+
+    def get_closed_trades(self):
+        """Return a list of all completed trades."""
+        return self.trades
+
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\exit_manager.py
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\exit_manager.py
+################################################################################
+
+class ExitManager:
+    def __init__(self):
+        self.last_exit_signal = None
+
+    def evaluate_exit(self, data_point: dict, indicators: dict, position: dict):
+        """
+        We no longer exit based on indicators.
+        Always return None so that we rely solely on the stop-loss/take-profit logic.
+        """
+        return None
+
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\export_files_to_outputtext.py
+################################################################################
+
+import os
+
+def write_python_files_to_output(output_filename="output.txt"):
+    root_dir = os.getcwd()
+    output_path = os.path.join(root_dir, output_filename)
+    
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        for dirpath, _, filenames in os.walk(root_dir):
+            for filename in filenames:
+                if filename.endswith(".py"):  # Only process Python files
+                    file_path = os.path.join(dirpath, filename)
+                    
+                    # Write file separator
+                    output_file.write(f"\n# File: {file_path}\n")
+                    output_file.write("#" * 80 + "\n\n")
+                    
+                    # Read and write file content
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as py_file:
+                            output_file.write(py_file.read())
+                    except Exception as e:
+                        output_file.write(f"\n# ERROR READING FILE: {e}\n")
+                    
+                    output_file.write("\n" + "#" * 80 + "\n")
+    
+    print(f"All Python files have been written to {output_filename}")
+
+if __name__ == "__main__":
+    write_python_files_to_output()
+
+
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\indicator_calculator.py
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\indicator_calculator.py
+
+import pandas as pd
+import numpy as np
+
+class IndicatorCalculator:
+    """
+    Computes technical indicators such as EMA, RSI, ATR, MACD, Stochastic, etc.
+    """
+
+    def __init__(self):
+        # You can store default periods here or pass them in methods below
+        pass
+
+    def compute_ema(self, df: pd.DataFrame, span: int) -> pd.Series:
+        return df['close'].ewm(span=span, adjust=False).mean()
+
+    def compute_rsi(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """
+        Compute RSI using a simplified (ema-based) method.
+        """
+        delta = df['close'].diff()
+        up = delta.clip(lower=0)
+        down = -1 * delta.clip(upper=0)
+
+        ema_up = up.ewm(com=period - 1, adjust=False).mean()
+        ema_down = down.ewm(com=period - 1, adjust=False).mean()
+
+        rs = ema_up / ema_down
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    def compute_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = true_range.rolling(window=period).mean()  # Alternatively use an EMA
+        return atr
+
+    def compute_macd(self, df: pd.DataFrame, fast=12, slow=26, signal=9):
+        """
+        Returns MACD line and Signal line as a tuple (macd, macd_signal).
+        """
+        ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
+        ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        macd_signal = macd_line.ewm(span=signal, adjust=False).mean()
+        return macd_line, macd_signal
+
+    def compute_stochastic(self, df: pd.DataFrame, k_period=14, d_period=3):
+        """
+        Returns %K and %D lines for Stochastic.
+        """
+        low_min = df['low'].rolling(window=k_period).min()
+        high_max = df['high'].rolling(window=k_period).max()
+
+        stoch_k = 100 * (df['close'] - low_min) / (high_max - low_min + 1e-9)
+        stoch_d = stoch_k.rolling(window=d_period).mean()
+        return stoch_k, stoch_d
+
+    def add_indicators(
+        self,
+        df: pd.DataFrame,
+        short_ema_period=5,
+        medium_ema_period=15,
+        rsi_period=14,
+        atr_period=14,
+        compute_macd=False,
+        compute_stoch=False
+    ) -> pd.DataFrame:
+        """
+        Add multiple indicators to the DataFrame.
+        """
+        # Short EMA
+        df['EMA_short'] = self.compute_ema(df, short_ema_period)
+
+        # Medium EMA
+        df['EMA_medium'] = self.compute_ema(df, medium_ema_period)
+
+        # RSI
+        df['RSI'] = self.compute_rsi(df, rsi_period)
+
+        # ATR
+        df['ATR'] = self.compute_atr(df, atr_period)
+
+        # Optional MACD
+        if compute_macd:
+            macd_line, macd_signal = self.compute_macd(df)
+            df['MACD'] = macd_line
+            df['MACD_signal'] = macd_signal
+
+        # Optional Stochastic
+        if compute_stoch:
+            stoch_k, stoch_d = self.compute_stochastic(df)
+            df['StochK'] = stoch_k
+            df['StochD'] = stoch_d
+
+        return df
+
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\performance_analyzer.py
+################################################################################
+
+import pandas as pd
+
+class PerformanceAnalyzer:
+    """
+    Computes PnL, drawdown, win rate, etc. on the trades recorded by ExecutionSimulator.
+    """
+    def __init__(self, trades):
+        # trades is a list of dicts: each containing entry_price, exit_price, etc.
+        self.trades = trades
+        self.trades_df = None
+        if trades:
+            self.trades_df = pd.DataFrame(trades)
+
+    def compute_basic_metrics(self):
+        """
+        Returns a dict of basic performance metrics: total PnL, win rate, etc.
+        """
+        if self.trades_df is None or self.trades_df.empty:
+            return {
+                'total_trades': 0,
+                'total_pnl': 0.0,
+                'win_rate': 0.0,
+            }
+        
+        # For a LONG position, PnL = exit_price - entry_price
+        # For a SHORT position, PnL = entry_price - exit_price
+        def calculate_trade_pnl(row):
+            if row['position_type'] == 'LONG':
+                return row['exit_price'] - row['entry_price']
+            elif row['position_type'] == 'SHORT':
+                return row['entry_price'] - row['exit_price']
+            else:
+                return 0.0
+
+        self.trades_df['pnl'] = self.trades_df.apply(calculate_trade_pnl, axis=1)
+
+        total_trades = len(self.trades_df)
+        total_pnl = self.trades_df['pnl'].sum()
+        wins = self.trades_df[self.trades_df['pnl'] > 0]
+        win_rate = len(wins) / total_trades if total_trades > 0 else 0
+
+        return {
+            'total_trades': total_trades,
+            'total_pnl': total_pnl,
+            'win_rate': win_rate,
+        }
+
+    def compute_drawdown(self):
+        """
+        A simplistic approach to compute drawdown from a running PnL series.
+        """
+        if self.trades_df is None or self.trades_df.empty:
+            return 0.0
+        
+        # Construct an equity curve from the trades. This is simplified.
+        self.trades_df = self.trades_df.sort_values(by='exit_time')
+        self.trades_df['cum_pnl'] = self.trades_df['pnl'].cumsum()
+        peak = self.trades_df['cum_pnl'].cummax()
+        drawdown = (self.trades_df['cum_pnl'] - peak).min()
+        return drawdown  # negative number indicating max drawdown
+    # In performance_analyzer.py
+
+    def compute_detailed_metrics(self):
+        if self.trades_df is None or self.trades_df.empty:
+            return {}
+
+        # Calculate trade PnL for each trade:
+        def calculate_trade_pnl(row):
+            if row['position_type'] == 'LONG':
+                return row['exit_price'] - row['entry_price']
+            elif row['position_type'] == 'SHORT':
+                return row['entry_price'] - row['exit_price']
+            else:
+                return 0.0
+
+        self.trades_df['pnl'] = self.trades_df.apply(calculate_trade_pnl, axis=1)
+
+        winners = self.trades_df[self.trades_df['pnl'] > 0]
+        losers = self.trades_df[self.trades_df['pnl'] < 0]
+        total_trades = len(self.trades_df)
+        winning_trades = len(winners)
+        losing_trades = len(losers)
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        avg_pl = self.trades_df['pnl'].mean()
+        largest_win = self.trades_df['pnl'].max()
+        largest_loss = self.trades_df['pnl'].min()
+        sum_winners = winners['pnl'].sum()
+        sum_losers = abs(losers['pnl'].sum())
+        profit_factor = (sum_winners / sum_losers) if sum_losers != 0 else float('inf')
+        avg_win = winners['pnl'].mean() if not winners.empty else 0
+        avg_loss = abs(losers['pnl'].mean()) if not losers.empty else 0
+        ratio_avg_win_loss = (avg_win / avg_loss) if avg_loss != 0 else float('inf')
+
+        # Optionally, calculate avg_bar_count if you have time/index data that represents bars.
+        avg_bar_count = None  # Replace with your own logic if needed
+
+        stats = {
+            'total_trades': total_trades,
+            'winning_trades': winning_trades,
+            'losing_trades': losing_trades,
+            'win_rate': win_rate,
+            'avg_pl': avg_pl,
+            'largest_win': largest_win,
+            'largest_loss': largest_loss,
+            'profit_factor': profit_factor,
+            'ratio_avg_win_loss': ratio_avg_win_loss,
+            'avg_bar_count': avg_bar_count,
+        }
+
+        return stats
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\results_and_reporting.py
+################################################################################
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+class ResultsAndReporting:
+    """
+    Outputs trade logs, visualizes performance, etc.
+    """
+    def __init__(self, trades):
+        self.trades = trades
+        self.trades_df = pd.DataFrame(trades) if trades else pd.DataFrame()
+
+    def save_trades_to_csv(self, file_path: str):
+        """Save the trades DataFrame to a CSV file."""
+        if not self.trades_df.empty:
+            self.trades_df.to_csv(file_path, index=False)
+            print(f"Trades have been saved to {file_path}")
+
+
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\strategy_logic.py
+################################################################################
+
+# File: C:\cygwin64\home\student\Test_Strategies\MES\strategy_logic.py
+
+from entry_manager import EntryManager
+from exit_manager import ExitManager
+
+class StrategyLogic:
+    """
+    Combines EntryManager and ExitManager to produce trade signals.
+    """
+    def __init__(self, strategy_config: dict):
+        self.entry_manager = EntryManager(strategy_config)
+        self.exit_manager = ExitManager()
+        self.current_position = None  # {'type': 'LONG'/'SHORT', 'entry_price': ...}
+
+    def update_position(self, new_position):
+        self.current_position = new_position
+
+    def check_signal(self, data_point: dict, multi_indicators: dict):
+        # If no position is open, decide on an entry based solely on 5m data:
+        if self.current_position is None:
+            # For example, consider an uptrend if the current 5m close is above the 5m medium EMA.
+            close_5m = data_point['close']
+            ema_medium_5m = multi_indicators['5m']['EMA_medium']
+            ema_short_5m = multi_indicators['5m']['EMA_short']
+            rsi_5m = multi_indicators['5m']['RSI']
+            
+            # Define a simple trend: if close is above the medium EMA, call it uptrend; otherwise, downtrend.
+            uptrend = close_5m > ema_medium_5m
+            downtrend = close_5m < ema_medium_5m
+            
+            if uptrend:
+                # Enter long if EMA_short is above EMA_medium and RSI is greater than 50
+                if ema_short_5m > ema_medium_5m and rsi_5m > 45:
+                    return {'type': 'LONG', 'reason': '5m uptrend: close > EMA_medium and RSI > 50'}
+            if downtrend:
+                # Enter short if EMA_short is below EMA_medium and RSI is less than 50
+                if ema_short_5m < ema_medium_5m and rsi_5m < 55:
+                    return {'type': 'SHORT', 'reason': '5m downtrend: close < EMA_medium and RSI < 50'}
+        
+        return None
+
+################################################################################

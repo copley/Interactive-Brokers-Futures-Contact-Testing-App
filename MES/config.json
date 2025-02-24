@@ -1,0 +1,20 @@
+{
+  "indicators": {
+    "short_ema_period": 9,
+    "medium_ema_period": 20,
+    "rsi_period": 14,
+    "atr_period": 14,
+    "compute_macd": true,
+    "compute_stoch": true
+  },
+  "strategy": {
+    "RSI_overbought": 70,
+    "RSI_oversold": 30
+  },
+  "execution": {
+    "stop_offset": 2,
+    "target_offset": 5,
+    "enable_trailing_stop": true,
+    "trailing_stop_offset": 2.5
+  }
+}
