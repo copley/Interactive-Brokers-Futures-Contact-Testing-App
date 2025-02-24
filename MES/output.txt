@@ -1,5 +1,5 @@
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\backtesting_app.py
+# File: /home/student/Test_Strategies/MES/backtesting_app.py
 ################################################################################
 
 # backtesting_app.py
@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\data_loader.py
+# File: /home/student/Test_Strategies/MES/data_loader.py
 ################################################################################
 
 import pandas as pd
@@ -253,7 +253,7 @@ class DataLoader:
 
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\entry_manager.py
+# File: /home/student/Test_Strategies/MES/entry_manager.py
 ################################################################################
 
 class EntryManager:
@@ -293,7 +293,7 @@ class EntryManager:
 
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\execution_simulator.py
+# File: /home/student/Test_Strategies/MES/execution_simulator.py
 ################################################################################
 
 # File: C:\cygwin64\home\student\Test_Strategies\MES\execution_simulator.py
@@ -465,7 +465,7 @@ class ExecutionSimulator:
 
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\exit_manager.py
+# File: /home/student/Test_Strategies/MES/exit_manager.py
 ################################################################################
 
 # File: C:\cygwin64\home\student\Test_Strategies\MES\exit_manager.py
@@ -484,7 +484,7 @@ class ExitManager:
 
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\export_files_to_outputtext.py
+# File: /home/student/Test_Strategies/MES/export_files_to_outputtext.py
 ################################################################################
 
 import os
@@ -520,7 +520,7 @@ if __name__ == "__main__":
 
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\indicator_calculator.py
+# File: /home/student/Test_Strategies/MES/indicator_calculator.py
 ################################################################################
 
 # File: C:\cygwin64\home\student\Test_Strategies\MES\indicator_calculator.py
@@ -625,7 +625,7 @@ class IndicatorCalculator:
 
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\performance_analyzer.py
+# File: /home/student/Test_Strategies/MES/performance_analyzer.py
 ################################################################################
 
 import pandas as pd
@@ -740,7 +740,7 @@ class PerformanceAnalyzer:
         return stats
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\results_and_reporting.py
+# File: /home/student/Test_Strategies/MES/results_and_reporting.py
 ################################################################################
 
 import pandas as pd
@@ -763,7 +763,7 @@ class ResultsAndReporting:
 
 ################################################################################
 
-# File: C:\cygwin64\home\student\Test_Strategies\MES\strategy_logic.py
+# File: /home/student/Test_Strategies/MES/strategy_logic.py
 ################################################################################
 
 # File: C:\cygwin64\home\student\Test_Strategies\MES\strategy_logic.py
